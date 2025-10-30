@@ -1,8 +1,8 @@
 """
-Fast vector-based voter box filter (left-side OCR optimization).
+oter box filter -left-side OCR optimization
 Detects voter boxes using PyMuPDF get_drawings(),
-OCRs only the left half of each box for speed,
-but saves the full rectangle if the house number matches.
+OCRs only the left half of each box for speed
+but saves the full rectangle if the house number matches
 debug 
 
 """
@@ -16,7 +16,7 @@ import io, re
 
 INPUT_PDF = "ward 17.pdf"
 OUTPUT_PDF = "filtered_output.pdf"
-dpi = 350  #pixel
+dpi = 400  #pixel
 DEFAULT_PAD = (5, 10, 5, 15)  # (left, top, right, bottom)
 
 
@@ -95,42 +95,30 @@ def main():
         print(" No matches found — check OCR output or house number formatting.")
         return
 
-    # build
     out_doc = fitz.open()
-    page_width, page_height = 595, 842  # A4
+    page_width, page_height = 595, 842  # A4 in points
     boxes_per_row, boxes_per_page = 2, 20
-    voter_width = page_width / boxes_per_row
-    voter_height = page_height / (boxes_per_page / boxes_per_row)
+    voter_width = page_width // boxes_per_row
+    voter_height = page_height // (boxes_per_page // boxes_per_row)
 
     count = 0
-    out_page = out_doc.new_page(width=page_width, height=page_height)
-    x_pt, y_pt = 0, 0
-
-    for _, crop in collected:
-        # start new page if needed
-        if count > 0 and count % boxes_per_page == 0:
+    for page_idx, crop in collected:
+        if count % boxes_per_page == 0:
             out_page = out_doc.new_page(width=page_width, height=page_height)
             x_pt, y_pt = 0, 0
 
-        pil = Image.fromarray(crop)
-        img_w, img_h = pil.size
-        rect = fitz.Rect(x_pt + 5, y_pt + 5,
-                         x_pt + 5 + img_w * 72 / dpi,
-                         y_pt + 5 + img_h * 72 / dpi)
-
+        pil = Image.fromarray(crop).resize((int(voter_width - 10), int(voter_height - 10)))
         buf = io.BytesIO()
         pil.save(buf, format="PNG")
+        rect = fitz.Rect(x_pt+5, y_pt+5, x_pt+voter_width-5, y_pt+voter_height-5)
         out_page.insert_image(rect, stream=buf.getvalue())
 
         count += 1
-
-        # move to next position
         if count % boxes_per_row == 0:
             x_pt = 0
             y_pt += voter_height
         else:
             x_pt += voter_width
-
 
     out_doc.save(OUTPUT_PDF)
     out_doc.close()
