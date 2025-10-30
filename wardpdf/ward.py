@@ -17,7 +17,7 @@ import io, re
 INPUT_PDF = "ward 17.pdf"
 OUTPUT_PDF = "filtered_output.pdf"
 dpi = 400  #pixel
-DEFAULT_PAD = (5, 10, 5, 15)  # (left, top, right, bottom)
+DEFAULT_PAD = (3, 10, 3, 15)  # (left, top, right, bottom)
 
 
 house_no_input = input("Enter a single house number (e.g. 15/350): ").strip().replace(" ", "")
