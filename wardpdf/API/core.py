@@ -1,5 +1,4 @@
-
-import fitz  # PyMuPDF
+import fitz
 import pytesseract
 from PIL import Image
 import io, re, os
@@ -7,23 +6,65 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+# ---------------- CONFIG ----------------
 DPI = 400
 OUTPUT_DIR = "output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 HOUSE_RE = re.compile(r"(\d{1,3}\s*/\s*\d{1,4})")
-TESSERACT_CONFIG = r"--oem 1 --psm 6"
+TESSERACT_CONFIG = r"--oem 3 --psm 6"
+# ----------------------------------------
+
 
 def ocr_malayalam(pixmap):
-    """Run OCR on image pixmap and return cleaned text."""
-    img = Image.open(io.BytesIO(pixmap.tobytes("png")))
-    text = pytesseract.image_to_string(img, lang="mal+eng")
-    text = re.sub(r"[|•■□]+", "", text)
-    return "\n".join([line.strip() for line in text.splitlines() if line.strip()])
+    """Run OCR with an English pass for Voter ID."""
+    img = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("L")
+    img = img.point(lambda x: 0 if x < 180 else 255, "1")
+
+    # Full Malayalam + English OCR
+    text = pytesseract.image_to_string(img, lang="mal+eng", config=TESSERACT_CONFIG)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    # Re-OCR top ~18% for cleaner English Voter ID
+    if lines:
+        top_crop = img.crop((0, 0, img.width, int(img.height * 0.18)))
+        id_text = pytesseract.image_to_string(
+            top_crop, lang="eng",
+            config="--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/"
+        )
+        id_text = re.sub(r"[^A-Za-z0-9/]", "", id_text).strip()
+        if id_text:
+            lines[0] = id_text
+
+    return "\n".join(lines)
 
 
-def process_voter_pdf(pdf_bytes, house_no_input,mode):
-    """Main processing logic: filter by house number and export PDF/XLSX."""
+
+
+def parse_voter_lines(lines):
+    """Parse OCR lines into structured fields (without gender/age)."""
+    lines = [l.strip() for l in lines if l.strip()]
+    while len(lines) < 5:
+        lines.append("")
+
+    # Voter ID
+    id_match = re.search(r"[A-Z0-9/]{5,}", "".join(lines))
+    voter_id = id_match.group(0).strip(".") if id_match else ""
+
+    name = lines[1] if len(lines) > 1 else ""
+    relation = lines[2] if len(lines) > 2 else ""
+    house_no = lines[3] if len(lines) > 3 else ""
+    house_name = ""
+
+    # Detect house name line (4th/5th)
+    if len(lines) > 4 and not re.search(r"\d{1,3}", lines[4]):
+        house_name = lines[4].strip()
+
+    return voter_id, name, relation, house_no, house_name
+
+
+def process_voter_pdf(pdf_bytes, house_no_input, mode):
+    """Filter by house number and export as PDF/XLSX."""
     temp_pdf = os.path.join(OUTPUT_DIR, "temp_input.pdf")
     with open(temp_pdf, "wb") as f:
         f.write(pdf_bytes)
@@ -46,7 +87,6 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
 
         for rect_index, r in enumerate(rects):
             try:
-                # --- Check if this box belongs to the house ---
                 x0, y0, x1, y1 = int(r.x0 * scale), int(r.y0 * scale), int(r.x1 * scale), int(r.y1 * scale)
                 full_crop = img_arr[y0:y1, x0:x1]
                 sub_crop = full_crop[:, :int(full_crop.shape[1] * 0.5)]
@@ -55,7 +95,7 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
                 if house_no_input not in matches:
                     continue
 
-                # --- Crop center-right portion for structured extraction ---
+                # Focused crop for the voter details
                 width = r.x1 - r.x0
                 height = r.y1 - r.y0
                 value_area = fitz.Rect(
@@ -71,30 +111,7 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
                     continue
 
                 lines = [l.strip() for l in text.split("\n") if l.strip()]
-                while len(lines) < 6:
-                    lines.append("")
-
-                id_match = re.search(r"[A-Z0-9/]{5,}", text.replace(" ", ""))
-                voter_id = id_match.group(0).strip(".") if id_match else ""
-
-                name = lines[1] if len(lines) > 1 else ""
-                relation = lines[2] if len(lines) > 2 else ""
-                house_no = lines[3] if len(lines) > 3 else ""
-                house_name = lines[4] if len(lines) > 4 else ""
-                # --- Detect sex/age line dynamically ---
-                sex_age_line = ""
-                for l in lines:
-                    if re.search(r"(പു|പുരുഷൻ|സ്ത്രീ|പുരുഷാ|സ്ത്രീയി|Male|Female|M|F)\s*/?\s*\d{1,3}", l):  # Malayalam or English sex + age pattern
-                        sex_age_line = l.strip()
-                        break
-
-                # --- Fallback if still not found ---
-                if not sex_age_line and len(lines) > 5:
-                    sex_age_line = lines[-1].strip()
-
-                # --- Save as single field ---
-                sex_age = sex_age_line
-
+                voter_id, name, relation, house_no, house_name = parse_voter_lines(lines)
 
                 all_voters.append({
                     "VoterID": voter_id,
@@ -102,7 +119,6 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
                     "Relation": relation,
                     "HouseNo": house_no.strip(),
                     "HouseName": house_name.strip(),
-                    "SexAge": sex_age.strip(),
                     "Page": page_idx + 1,
                     "RectIndex": rect_index
                 })
@@ -114,18 +130,16 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
 
     results = {}
 
-
-
     if mode == "xlsx":
         xlsx_path = os.path.join(OUTPUT_DIR, f"voter_data_{house_no_input.replace('/', '-')}.xlsx")
-        pd.DataFrame(all_voters).to_excel(xlsx_path, index=False, engine="openpyxl")
+        df = pd.DataFrame(all_voters)
+        df.to_excel(xlsx_path, index=False, engine="openpyxl")
         results["xlsx"] = xlsx_path
 
     elif mode == "pdf":
         pdf_path = os.path.join(OUTPUT_DIR, f"filtered_{house_no_input.replace('/', '-')}.pdf")
         save_filtered_pdf(collected, pdf_path)
         results["pdf"] = pdf_path
-
 
     doc.close()
     return results
