@@ -1,4 +1,4 @@
-import fitz
+import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 import io, re, os
@@ -17,20 +17,23 @@ TESSERACT_CONFIG = r"--oem 3 --psm 6"
 
 
 def ocr_malayalam(pixmap):
-    """Run OCR with an English pass for Voter ID."""
+    """Run OCR on image pixmap with improved English top-line accuracy for Voter ID."""
     img = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("L")
-    img = img.point(lambda x: 0 if x < 180 else 255, "1")
 
-    # Full Malayalam + English OCR
+    # Binarize for better contrast
+    img = img.point(lambda x: 0 if x < 165 else 255, "1")
+
+    # OCR full block (Malayalam + English)
     text = pytesseract.image_to_string(img, lang="mal+eng", config=TESSERACT_CONFIG)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    # Re-OCR top ~18% for cleaner English Voter ID
+    # Re-OCR top ~18% for cleaner Voter ID (English only)
     if lines:
         top_crop = img.crop((0, 0, img.width, int(img.height * 0.18)))
         id_text = pytesseract.image_to_string(
-            top_crop, lang="eng",
-            config="--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/"
+            top_crop,
+            lang="eng",
+            config="--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/",
         )
         id_text = re.sub(r"[^A-Za-z0-9/]", "", id_text).strip()
         if id_text:
@@ -39,15 +42,13 @@ def ocr_malayalam(pixmap):
     return "\n".join(lines)
 
 
-
-
-def parse_voter_lines(lines):
-    """Parse OCR lines into structured fields (without gender/age)."""
+def parse_voter_lines(lines, pixmap=None):
+    """Parse OCR lines into structured fields (VoterID, Name, Relation, HouseNo, HouseName, Age)."""
     lines = [l.strip() for l in lines if l.strip()]
-    while len(lines) < 5:
+    while len(lines) < 6:
         lines.append("")
 
-    # Voter ID
+    # Extract Voter ID (English alphanumeric)
     id_match = re.search(r"[A-Z0-9/]{5,}", "".join(lines))
     voter_id = id_match.group(0).strip(".") if id_match else ""
 
@@ -55,12 +56,37 @@ def parse_voter_lines(lines):
     relation = lines[2] if len(lines) > 2 else ""
     house_no = lines[3] if len(lines) > 3 else ""
     house_name = ""
+    age = ""
 
-    # Detect house name line (4th/5th)
+    # ✅ Clean OCR artifact: remove unwanted 'വ്‌' prefix
+    relation = re.sub(r"^(വ്‌|വ്|\u0D35\u0D4D\u200C)", "", relation).strip()
+
+    # Try to get Malayalam house name
+    has_house_name = False
     if len(lines) > 4 and not re.search(r"\d{1,3}", lines[4]):
         house_name = lines[4].strip()
+        has_house_name = True
 
-    return voter_id, name, relation, house_no, house_name
+    # 🧠 Determine which line likely contains age info
+    age_line_index = 5 if has_house_name else 4
+    if len(lines) > age_line_index:
+        candidate_line = lines[age_line_index]
+        # Extract digits after '/'
+        match = re.search(r"/\s*(\d{2,3})", candidate_line)
+        if match:
+            age = match.group(1)
+        else:
+            # As fallback, re-OCR lower 20% of block in English mode
+            if pixmap:
+                img = Image.open(io.BytesIO(pixmap.tobytes("png")))
+                w, h = img.size
+                low_crop = img.crop((0, int(h * 0.80), w, h))
+                eng_text = pytesseract.image_to_string(low_crop, lang="eng", config="--psm 6")
+                match2 = re.search(r"(\d{2,3})", eng_text)
+                if match2:
+                    age = match2.group(1)
+
+    return voter_id, name, relation, house_no, house_name, age
 
 
 def process_voter_pdf(pdf_bytes, house_no_input, mode):
@@ -95,14 +121,14 @@ def process_voter_pdf(pdf_bytes, house_no_input, mode):
                 if house_no_input not in matches:
                     continue
 
-                # Focused crop for the voter details
+                # Crop voter box (region with full details)
                 width = r.x1 - r.x0
                 height = r.y1 - r.y0
                 value_area = fitz.Rect(
                     r.x0 + width * 0.26,
                     r.y0,
                     r.x1 - width * 0.2,
-                    r.y1
+                    r.y1,
                 )
 
                 pix_val = page.get_pixmap(clip=value_area, dpi=DPI)
@@ -111,7 +137,7 @@ def process_voter_pdf(pdf_bytes, house_no_input, mode):
                     continue
 
                 lines = [l.strip() for l in text.split("\n") if l.strip()]
-                voter_id, name, relation, house_no, house_name = parse_voter_lines(lines)
+                voter_id, name, relation, house_no, house_name, age = parse_voter_lines(lines, pix_val)
 
                 all_voters.append({
                     "VoterID": voter_id,
@@ -119,8 +145,9 @@ def process_voter_pdf(pdf_bytes, house_no_input, mode):
                     "Relation": relation,
                     "HouseNo": house_no.strip(),
                     "HouseName": house_name.strip(),
+                    "Age": age.strip(),
                     "Page": page_idx + 1,
-                    "RectIndex": rect_index
+                    "RectIndex": rect_index,
                 })
 
                 collected.append(full_crop)
@@ -174,3 +201,4 @@ def save_filtered_pdf(collected, output_path):
 
     out_doc.save(output_path)
     out_doc.close()
+    
