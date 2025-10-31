@@ -1,19 +1,24 @@
-# main.py
+
 from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
-from ocr_logic import process_voter_pdf
+from core import process_voter_pdf
+from enum import Enum
 
 app = FastAPI(title="Voter OCR & Filter API")
+
+class OutputMode(str, Enum):
+    pdf = "pdf"
+    xlsx = "xlsx"
+
 
 @app.post("/process")
 async def process_pdf(
     file: UploadFile,
-    house_no: str = Form("write houseno (e.g. 15/350,4/54) here"),
-    mode: str = Form("pdf or xlsx")
+    house_no: str = Form(...),
+    mode: OutputMode = Form(...)
 ):
-    """
-    mode: 'pdf' or 'xlsx'
-    """
+
+    
     if mode not in ("pdf", "xlsx"):
         raise HTTPException(status_code=400, detail="Invalid mode. Must be 'pdf' or 'xlsx'.")
 

@@ -1,4 +1,4 @@
-# ocr_logic.py
+
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
@@ -81,13 +81,20 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
                 relation = lines[2] if len(lines) > 2 else ""
                 house_no = lines[3] if len(lines) > 3 else ""
                 house_name = lines[4] if len(lines) > 4 else ""
-                sex_age = lines[5] if len(lines) > 5 else ""
+                # --- Detect sex/age line dynamically ---
+                sex_age_line = ""
+                for l in lines:
+                    if re.search(r"(പു|പുരുഷൻ|സ്ത്രീ|പുരുഷാ|സ്ത്രീയി|Male|Female|M|F)\s*/?\s*\d{1,3}", l):  # Malayalam or English sex + age pattern
+                        sex_age_line = l.strip()
+                        break
 
-                sex, age = "", ""
-                match = re.search(r"([പൂFMMS])[/\-]?\s*(\d{1,3})?", sex_age)
-                if match:
-                    sex = match.group(1)
-                    age = match.group(2) if match.group(2) else ""
+                # --- Fallback if still not found ---
+                if not sex_age_line and len(lines) > 5:
+                    sex_age_line = lines[-1].strip()
+
+                # --- Save as single field ---
+                sex_age = sex_age_line
+
 
                 all_voters.append({
                     "VoterID": voter_id,
@@ -95,8 +102,7 @@ def process_voter_pdf(pdf_bytes, house_no_input,mode):
                     "Relation": relation,
                     "HouseNo": house_no.strip(),
                     "HouseName": house_name.strip(),
-                    "Sex": sex,
-                    "Age": age,
+                    "SexAge": sex_age.strip(),
                     "Page": page_idx + 1,
                     "RectIndex": rect_index
                 })
